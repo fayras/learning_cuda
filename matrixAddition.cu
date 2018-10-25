@@ -1,5 +1,7 @@
 #include "cuda_runtime.h"
 #include "device_launch_parameters.h"
+#include <helper_cuda.h>
+#include <helper_timer.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <math.h>
@@ -31,6 +33,11 @@ Matrix* createRandomMatrix(int rows, int columns) {
 	return m;
 }
 
+void clean(Matrix* m) {
+	free(m->data);
+	free(m);
+}
+
 void printMatrix(Matrix* m) {
 	for (int i = 0; i < m->rows; i++) {
 		for (int j = 0; j < m->cols; j++) {
@@ -41,7 +48,7 @@ void printMatrix(Matrix* m) {
 	printf("\n");
 }
 
-Matrix* addOnCPU(Matrix* m1, Matrix* m2) {
+Matrix* addOnCPU(Matrix* m1, Matrix* m2, float* time) {
 	if (m1->rows != m2->rows || m1->cols != m2->cols) {
 		return NULL;
 	}
@@ -49,9 +56,17 @@ Matrix* addOnCPU(Matrix* m1, Matrix* m2) {
 	int size = m1->rows * m1->cols;
 	Matrix* m3 = createMatrix(m1->rows, m1->cols);
 
+	StopWatchInterface* timer = NULL;
+	sdkCreateTimer(&timer);
+	float start = sdkGetTimerValue(&timer);
+	sdkStartTimer(&timer);
+
 	for (int i = 0; i < size; i++) {
 		m3->data[i] = m1->data[i] + m2->data[i];
 	}
+
+	sdkStopTimer(&timer);
+	*time = sdkGetTimerValue(&timer) - start;
 
 	return m3;
 }
@@ -67,7 +82,7 @@ __global__ void kernel(float* m1, float* m2, float* m3, const int width, const i
 	}
 }
 
-Matrix* addOnGPU(Matrix* m1, Matrix* m2, dim3 grid, dim3 block) {
+Matrix* addOnGPU(Matrix* m1, Matrix* m2, dim3 grid, dim3 block, float* time) {
 	if (m1->rows != m2->rows || m1->cols != m2->cols) {
 		return NULL;
 	}
@@ -83,7 +98,17 @@ Matrix* addOnGPU(Matrix* m1, Matrix* m2, dim3 grid, dim3 block) {
 	cudaMemcpy(d_m2, m2->data, size, cudaMemcpyHostToDevice);
 	cudaMalloc((void**)&d_m3, size);
 
+	StopWatchInterface* timer = NULL;
+	sdkCreateTimer(&timer);
+	float start = sdkGetTimerValue(&timer);
+	sdkStartTimer(&timer);
+
 	kernel <<<grid, block>>> (d_m1, d_m2, d_m3, m1->cols, m1->rows * m1->cols);
+
+	checkCudaErrors(cudaThreadSynchronize());
+
+	sdkStopTimer(&timer);
+	*time = sdkGetTimerValue(&timer) - start;
 
 	Matrix* m3 = createMatrix(m1->rows, m2->cols);
 
@@ -119,17 +144,19 @@ bool checkResult(Matrix* hostMatrix, Matrix* deviceMatrix) {
 #define BLOCK_WIDTH_Y 16
 
 int main() {
-	const int dimX = 1000;
-	const int dimY = 1000;
-	
+	const int dimX = 100;
+	const int dimY = 100;
+
 	dim3 dimBlock(BLOCK_WIDTH_X, BLOCK_WIDTH_Y);
 	dim3 dimGrid(ceil(dimX / (float)BLOCK_WIDTH_X), ceil(dimY / (float)BLOCK_WIDTH_Y));
 
 	Matrix* m1 = createRandomMatrix(dimX, dimY);
 	Matrix* m2 = createRandomMatrix(dimX, dimY);
 
-	Matrix* m3 = addOnCPU(m1, m2);
-	Matrix* m4 = addOnGPU(m1, m2, dimGrid, dimBlock);
+	float timeCPU, timeGPU;
+
+	Matrix* m3 = addOnCPU(m1, m2, &timeCPU);
+	Matrix* m4 = addOnGPU(m1, m2, dimGrid, dimBlock, &timeGPU);
 
 	bool same = checkResult(m3, m4);
 
@@ -138,20 +165,20 @@ int main() {
 	// printMatrix(m3);
 	// printMatrix(m4);
 
-	free(m1->data);
-	free(m2->data);
-	free(m3->data);
-	free(m4->data);
-	free(m1);
-	free(m2);
-	free(m3);
-	free(m4);
+	clean(m1);
+	clean(m2);
+	clean(m3);
+	clean(m4);
 
 	cudaDeviceReset();
 
 	if (!same) {
 		return 1;
 	}
+
+	printf("Execution time:\n");
+	printf("CPU: %.6f ms\n", timeCPU);
+	printf("GPU: %.6f ms\n", timeGPU);
 
 	return 0;
 }
